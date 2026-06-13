@@ -1,0 +1,23 @@
+# 环境变量（包含密钥）
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# IDE 辅助文件
+.trae/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志文件
+logs/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
