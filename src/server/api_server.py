@@ -246,7 +246,7 @@ async def chat(req: ChatRequest):
 @app.get("/api/history/{session_id}")
 async def get_history(session_id: str):
     """
-    查询指定会话的完整对话历史。
+    查询指定会话的完整对话历史（从 MySQL 读取）。
 
     URL示例：
       GET /api/history/a1b2c3d4
@@ -254,22 +254,14 @@ async def get_history(session_id: str):
     返回值示例：
       {
         "session_id": "a1b2c3d4",
-        "history": [
-          {"role": "user", "content": "你好"},
-          {"role": "assistant", "content": "你好！有什么可以帮你？"},
-        ],
+        "history": [...],
         "count": 2
       }
-
-    调用链路：
-      → SessionManager.get_session(session_id) 获取 ChatSession 实例
-      → session.get_chat_history() 从 ConversationBufferMemory 提取消息
-        → 遍历 memory.chat_memory.messages
-        → 每条消息转成 {"role": "user/assistant", "content": "..."}
     """
     try:
-        session = SessionManager().get_session(session_id)
-        history = session.get_chat_history()
+        from src.server.chat_store import ChatStore
+        store = ChatStore()
+        history = store.get_history(session_id)
         return {
             "session_id": session_id,
             "history": history,
@@ -287,21 +279,20 @@ async def get_history(session_id: str):
 @app.delete("/api/history/{session_id}")
 async def delete_history(session_id: str):
     """
-    删除指定会话及其所有对话历史。
+    删除指定会话及其所有对话历史（同时清理 MySQL）。
 
     URL示例：
       DELETE /api/history/a1b2c3d4
 
     返回值示例：
       {"deleted": "a1b2c3d4"}
-
-    调用链路：
-      → SessionManager.delete_session(session_id)
-        → 从 _sessions 字典中移除该 session_id
-        → ChatSession 实例被Python垃圾回收，ConversationBufferMemory随之销毁
     """
     try:
+        # 从内存中移除
         SessionManager().delete_session(session_id)
+        # 从 MySQL 中移除
+        from src.server.chat_store import ChatStore
+        ChatStore().delete_session(session_id)
         return {"deleted": session_id}
     except Exception as e:
         logger.error(f"[delete] {str(e)}", exc_info=True)
@@ -316,20 +307,35 @@ async def delete_history(session_id: str):
 async def list_sessions():
     """
     列出当前服务端内存中所有活跃的会话。
+    """
+    return {"sessions": SessionManager().list_sessions()}
+
+
+# ============================================================================
+# 接口: GET /api/sessions/list  — 从 MySQL 列出所有历史会话
+# ============================================================================
+
+@app.get("/api/sessions/list")
+async def list_history_sessions():
+    """
+    从 MySQL 列出所有历史会话（按最后消息时间倒序）。
+    返回侧边栏渲染所需的数据：session_id, message_count, preview, last_time。
 
     返回值示例：
       {
         "sessions": [
-          {"session_id": "a1b2c3d4", "history_count": 5},
-          {"session_id": "e5f6g7h8", "history_count": 2}
+          {"session_id": "a1b2c3d4", "message_count": 5, "preview": "你好", "last_time": "2026-06-16T10:30:00"},
+          ...
         ]
       }
-
-    注意：
-      - 会话存储在内存中（SessionManager._sessions字典），服务重启后全部丢失
-      - history_count 是当前会话中已有的对话轮次数
     """
-    return {"sessions": SessionManager().list_sessions()}
+    try:
+        from src.server.chat_store import ChatStore
+        sessions = ChatStore().list_sessions()
+        return {"sessions": sessions}
+    except Exception as e:
+        logger.error(f"[sessions_list] {str(e)}", exc_info=True)
+        return {"sessions": []}
 
 
 # ============================================================================
@@ -600,17 +606,30 @@ async def upload_file(
 
 @app.get("/api/kb/list")
 async def list_knowledge_bases():
-    """获取知识库列表"""
+    """获取知识库列表（从 knowledge_bases 表读取含文档数）"""
     try:
-        from src.knowledge_ingest.chunk_store import ChunkStore
-        chunk_store = ChunkStore()
-        conn = chunk_store._get_connection()
+        import pymysql
+        from pathlib import Path
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent.parent / ".env")
+        conn = pymysql.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            port=int(os.getenv("DB_PORT", "3306")),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "fojiao_db"),
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+        )
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT kb_id, COUNT(*) as doc_count, COUNT(DISTINCT doc_id) as docs
-                FROM document_chunks
-                GROUP BY kb_id
-                ORDER BY kb_id
+                SELECT kb.kb_id, kb.kb_name, kb.created_at,
+                       COUNT(DISTINCT d.doc_id) as docs,
+                       COUNT(d.chunk_id) as doc_count
+                FROM knowledge_bases kb
+                LEFT JOIN document_chunks d ON kb.kb_id = d.kb_id
+                GROUP BY kb.kb_id, kb.kb_name, kb.created_at
+                ORDER BY kb.kb_id
             """)
             rows = cursor.fetchall()
         conn.close()
@@ -618,8 +637,10 @@ async def list_knowledge_bases():
         for r in rows:
             bases.append({
                 "kb_id": r["kb_id"],
+                "kb_name": r.get("kb_name", f"知识库 #{r['kb_id']}"),
                 "doc_count": r["doc_count"],
-                "docs": r["docs"]
+                "docs": r["docs"],
+                "created_at": str(r["created_at"]) if r.get("created_at") else ""
             })
         return {"success": True, "knowledge_bases": bases}
     except Exception as e:
@@ -629,10 +650,33 @@ async def list_knowledge_bases():
 
 @app.post("/api/kb/create")
 async def create_knowledge_base(kb_name: str = Form(...)):
-    """创建知识库（目前只是逻辑概念，通过kb_id区分）"""
-    import time
-    kb_id = int(time.time())
-    return {"success": True, "kb_id": kb_id, "name": kb_name}
+    """创建知识库（写入 knowledge_bases 表）"""
+    try:
+        import pymysql
+        from pathlib import Path
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent.parent.parent / ".env")
+        conn = pymysql.connect(
+            host=os.getenv("DB_HOST", "127.0.0.1"),
+            port=int(os.getenv("DB_PORT", "3306")),
+            user=os.getenv("DB_USER", "root"),
+            password=os.getenv("DB_PASSWORD", ""),
+            database=os.getenv("DB_NAME", "fojiao_db"),
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO knowledge_bases (kb_name) VALUES (%s)",
+                (kb_name,)
+            )
+            kb_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return {"success": True, "kb_id": kb_id, "name": kb_name}
+    except Exception as e:
+        logger.error(f"[kb_create] {str(e)}", exc_info=True)
+        return {"success": False, "error": "创建知识库失败"}
 
 
 @app.get("/api/kb/{kb_id}/docs")

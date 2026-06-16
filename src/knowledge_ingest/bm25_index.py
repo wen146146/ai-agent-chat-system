@@ -193,7 +193,7 @@ class BM25Index:
         if not cleaned:
             return []
         words = jieba.lcut(cleaned)
-        return [w for w in words if len(w) >= 2 and w not in STOP_WORDS]
+        return [w for w in words if len(w) >= 2 and w not in STOP_WORDS and not re.match(r'^\d+$', w)]
 
     # ----------------------------------------------------------------
     # BM25 打分

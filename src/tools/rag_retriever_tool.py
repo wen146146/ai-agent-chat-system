@@ -482,15 +482,10 @@ def _init_rag_retriever():
 @tool(args_schema=RagRetrieveInput)
 def rag_retrieve(query: str, kb_ids: List[int] = None, top_k: int = 5) -> str:
     """
-    RAG知识库检索工具，输入用户问题，从知识库中检索相关文档内容。
-    三路检索 + RRF 融合 + LLM 重排完整管线：
-    1. 查询预处理 - LLM标准化+润色+纠错
-    2. 查询扩写 - LLM生成多条语义相似表达
-    3. 向量检索(Qdrant) - 语义搜索
-    4. BM25稀疏检索(倒排索引) - 词频统计排序
-    5. 关键词检索(MySQL) - 同义词精确匹配 (保留)
-    6. RRF三路融合 - Reciprocal Rank Fusion
-    7. Rerank重排(可选) - LLM精排
+    从知识库检索技术面试相关知识。当用户问技术概念、原理、面试题、对比分析等问题时调用此工具。
+    内部使用三路检索（语义向量+BM25倒排+关键词）+ RRF融合 + 可选LLM精排，返回最相关的文档片段。
+    适用于：概念解释（"闭包是什么"）、原理分析（"MVVM工作原理"）、面试准备（"Spring常见面试题"）、技术对比（"TCP和UDP区别"）等场景。
+    注意：问候语、日常聊天、计算问题不需要调用此工具。
     """
     _init_rag_retriever()
 

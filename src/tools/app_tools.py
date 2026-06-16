@@ -55,11 +55,7 @@ class ListAppsInput(BaseModel):
 
 @tool(args_schema=OpenAppInput)
 def open_application(name: str, args: str = "") -> str:
-    """
-    打开指定的应用程序。
-    内置常见应用映射表（记事本、计算器、Chrome、VS Code 等）。
-    传入 args 可附带参数（如打开特定文件或网址）。
-    """
+    """打开本地应用程序。当用户说"打开记事本"、"启动计算器"、"打开Chrome"时调用。内置应用映射表，支持传参（如打开特定文件或网址）。目前支持：notepad、calc、chrome、edge、explorer、cmd、terminal、code。"""
     try:
         name_lower = name.strip().lower()
 
@@ -93,9 +89,7 @@ def open_application(name: str, args: str = "") -> str:
 
 @tool(args_schema=ListAppsInput)
 def list_applications() -> str:
-    """
-    列出所有可通过 open_application 打开的应用程序及其说明。
-    """
+    """列出所有可以通过 open_application 打开的应用程序。当用户问"你能打开什么应用"、"有哪些应用可以启动"时调用。返回应用名称和对应的可执行文件路径。"""
     lines = ["📋 可打开的应用程序："]
     for name in sorted(APP_MAP.keys()):
         display_name, executable, _ = APP_MAP[name]

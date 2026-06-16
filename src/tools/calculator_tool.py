@@ -14,8 +14,9 @@ class CalculatorInput(BaseModel):
 @tool(args_schema=CalculatorInput)
 def calculator(operation: str, a: Union[int, float], b: Union[int, float] = 0) -> str:
     """
-    数学计算工具，支持加、减、乘、除、幂、开方、对数、阶乘、三角函数等运算。
-    适用于需要数学计算的场景。
+    数学计算工具，处理数字运算。当用户需要做计算时调用此工具而非自己推算。
+    支持：add（加）、sub（减）、mul（乘）、div（除）、pow（幂）、sqrt（开方）、log（对数）、factorial（阶乘）、sin/cos/tan（三角函数）。
+    适用于：算术题、数据计算、公式运算等场景。注意：比较大小、排序、字符串操作不需要此工具。
     """
     try:
         if operation == "add":

@@ -29,10 +29,7 @@ class ProcessListInput(BaseModel):
 
 @tool(args_schema=SystemInfoInput)
 def get_system_info() -> str:
-    """
-    获取系统信息：CPU 使用率、内存占用、磁盘空间、操作系统版本。
-    只读操作，无需确认。
-    """
+    """获取系统硬件和操作系统信息。当用户问"电脑配置"、"系统信息"、"CPU多少"、"内存多大"、"磁盘空间"时调用。返回CPU使用率、内存占用、磁盘空间、操作系统版本。"""
     try:
         import psutil
     except ImportError:
@@ -88,10 +85,7 @@ def get_system_info() -> str:
 
 @tool(args_schema=ProcessListInput)
 def get_process_list(top_n: int = 10) -> str:
-    """
-    获取当前进程列表，按 CPU 占用率降序排列。
-    只读操作，无需确认。
-    """
+    """获取进程列表。当用户问"哪些进程在跑"、"看看进程"、"CPU占用高"时调用。按CPU占用率降序排列，默认返回Top-10。"""
     try:
         import psutil
     except ImportError:

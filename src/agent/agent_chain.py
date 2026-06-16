@@ -36,6 +36,10 @@ from langchain.memory import ConversationBufferMemory
 from src.utils.logger import logger
 from src.utils.audit import log_tool_call
 
+# 对话历史 MySQL 持久化
+from src.server.chat_store import ChatStore, ensure_table
+ensure_table()
+
 # ============================================================================
 # 配置
 # ============================================================================
@@ -72,15 +76,39 @@ TOOL_MAP: Dict[str, BaseTool] = {t.name: t for t in NATIVE_TOOLS}
 # ============================================================================
 
 SYSTEM_PROMPT = (
-    "你是一个智能面试知识助手。\n\n"
-    "核心能力：\n"
-    "1. 知识问答 - 从知识库检索技术面试相关问题\n"
-    "2. 工具调用 - 需要时可计算、搜索、操作文件\n"
-    "3. 记忆功能 - 自动记住对话中的关键信息\n\n"
-    "回答原则：\n"
-    "- 专业、简洁、有引用来源\n"
-    "- 需要工具时主动调用，不需要时不啰嗦\n"
-    "- 如果工具返回结果，把结果整合到回答中"
+    "你是一个万事通智能助手，名叫【面试知识助手】。你无所不知，但更擅长利用工具和知识库来给出准确答案。\n\n"
+    "【角色定位】\n"
+    "你是一个万事通——面试知识、技术原理、编程问题、系统操作，样样精通。\n"
+    "但你不靠猜测回答，而是通过工具查找、知识库检索和记忆回顾来确保答案准确。\n\n"
+    "【核心能力 — 你拥有以下工具】\n"
+    "📚 知识库检索（rag_retrieve）\n"
+    "  - 技术概念、面试题、原理分析 → 先查知识库，给出有来源的答案\n"
+    "🌐 联网搜索（web_search / web_fetch）\n"
+    "  - 最新资讯、实时数据、知识库查不到的内容 → 联网获取\n"
+    "🧮 数学计算（calculator）\n"
+    "  - 数字运算 → 调用计算器而非自己算\n"
+    "🧠 记忆功能（episodic_memory / semantic_memory）\n"
+    "  - 保存和回顾对话记录、用户偏好、知识总结\n"
+    "📁 文件操作（read_file / write_file / search_files / list_directory）\n"
+    "  - 读取、写入、搜索文件和目录\n"
+    "💻 系统操作（run_command / get_system_info / get_process_list）\n"
+    "  - 执行命令、查看系统信息、进程列表\n"
+    "🖥️ 应用控制（open_application / list_applications）\n"
+    "  - 打开本地应用程序\n\n"
+    "【回答原则】\n"
+    "1. 专业、简洁、有引用来源\n"
+    "2. 需要工具时主动调用，不需要时不啰嗦\n"
+    "3. 工具返回结果要整合到回答中，不要重复原文\n"
+    "4. 不知道就说不知道，不要编造\n"
+    "5. 多轮对话中注意上下文连贯性\n\n"
+    "【安全规范】\n"
+    "1. 永远不要执行删除文件、格式化磁盘、关机等危险操作\n"
+    "2. 写入文件仅限于项目目录（./data, ./output, ./static）\n"
+    "3. 执行命令只允许白名单中的命令（dir/git/npm/ipconfig 等）\n"
+    "4. 不要安装或卸载任何软件包（pip install/uninstall 被拦截）\n"
+    "5. 不要执行 python -c 任意代码\n"
+    "6. 保护用户隐私，不记录敏感信息（密码、token、Key 等）\n"
+    "7. 如果用户要求做危险操作，礼貌拒绝并解释原因"
 )
 
 
@@ -96,6 +124,23 @@ class ChatSession:
             return_messages=True,
             output_key="output"
         )
+        # 从 MySQL 加载历史对话到 memory（页面刷新后恢复）
+        self._load_history_from_db()
+
+    def _load_history_from_db(self):
+        """从 MySQL 加载该会话的历史消息到 ConversationBufferMemory。"""
+        try:
+            store = ChatStore()
+            history = store.get_history(self.session_id)
+            for msg in history:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user":
+                    self.memory.chat_memory.add_user_message(content)
+                elif role == "assistant":
+                    self.memory.chat_memory.add_ai_message(content)
+        except Exception:
+            pass  # MySQL 不可用时静默跳过
 
     def _build_messages(self, user_message: str) -> list:
         """
@@ -229,20 +274,33 @@ class SessionManager:
 # StreamCallback — 前端流式事件收集
 # ============================================================================
 
+import queue
+
 class StreamCallback:
-    """收集工具调用和 token 事件，供前端实时展示"""
-    def __init__(self, queue: list):
-        self.queue = queue
+    """收集工具调用和 token 事件，供前端实时展示（线程安全，使用 queue.Queue）"""
+    def __init__(self, q: queue.Queue):
+        self.queue = q
 
     def on_llm_new_token(self, token: str):
-        self.queue.append({"type": "token", "content": token})
+        self.queue.put({"type": "token", "content": token})
 
     def on_tool_start(self, serialized: dict, input_str: str):
         name = serialized.get("name", "unknown") if serialized else "unknown"
-        self.queue.append({"type": "tool_start", "name": name, "input": str(input_str)[:200]})
+        self.queue.put({"type": "tool_start", "name": name, "input": str(input_str)[:200]})
 
     def on_tool_end(self, output: str):
-        self.queue.append({"type": "tool_result", "result": str(output)[:500]})
+        self.queue.put({"type": "tool_result", "result": str(output)[:500]})
+
+
+def drain_queue(q: queue.Queue) -> list:
+    """安全地排出 queue.Queue 中所有事件，返回 list。"""
+    events = []
+    while not q.empty():
+        try:
+            events.append(q.get_nowait())
+        except queue.Empty:
+            break
+    return events
 
 
 # ============================================================================
@@ -267,14 +325,14 @@ def stream_chat(message: str, session_id: str) -> Generator[dict, None, None]:
       - {"type": "end"}                          流结束
     """
     session = SessionManager().get_session(session_id)
-    event_queue: List[dict] = []
+    event_queue: queue.Queue = queue.Queue()
     callback = StreamCallback(event_queue)
 
     try:
         output_text = session.run_agent(message, callback)
 
-        # 先发送工具调用等中间事件
-        for event in event_queue:
+        # 先发送工具调用等中间事件（从线程安全队列取出）
+        for event in drain_queue(event_queue):
             yield event
 
         # 保存本轮对话到 memory
@@ -283,6 +341,13 @@ def stream_chat(message: str, session_id: str) -> Generator[dict, None, None]:
                 {"input": message},
                 {"output": output_text}
             )
+            # 持久化到 MySQL（页面刷新后可以恢复）
+            try:
+                store = ChatStore()
+                store.save_message(session_id, "user", message)
+                store.save_message(session_id, "assistant", output_text)
+            except Exception:
+                pass  # MySQL 写入失败不影响主流程
 
         yield {"type": "final_output", "content": output_text}
         yield {"type": "end"}

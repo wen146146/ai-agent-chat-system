@@ -20,8 +20,9 @@ class WebPageFetchInput(BaseModel):
 @tool(args_schema=WebSearchInput)
 def web_search(query: str, num_results: int = 5) -> str:
     """
-    联网搜索工具，输入搜索关键词，返回相关网页的标题、摘要和链接。
-    适用于需要实时信息、最新资讯、事实查询等场景。
+    联网搜索，获取实时信息。当用户需要最新资讯、实时数据、不在知识库中的内容或需要验证事实时调用。
+    返回搜索结果的标题、摘要和链接。适合：新闻查询、实时数据、技术文档查找、外部知识补充等场景。
+    注意：概念解释类问题优先用 rag_retrieve 查知识库，查不到再用此工具。
     """
     num_results = min(num_results, 10)
 
@@ -81,8 +82,8 @@ def web_search(query: str, num_results: int = 5) -> str:
 @tool(args_schema=WebPageFetchInput)
 def web_fetch(url: str, max_chars: int = 3000) -> str:
     """
-    网页内容抓取工具，输入 URL 地址，抓取并返回网页的纯文本内容。
-    适用于需要查看某个网页详细内容的场景，可配合 web_search 使用。
+    抓取指定 URL 的网页内容，返回纯文本。通常配合 web_search 使用——先搜索得到链接，再用此工具查看详细内容。
+    适用于：查看搜索结果的具体文章内容、读取在线文档、查看网页详情等。
     """
     headers = {
         "User-Agent": (

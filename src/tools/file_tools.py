@@ -55,11 +55,7 @@ class ListDirInput(BaseModel):
 
 @tool(args_schema=ReadFileInput)
 def read_file(path: str, encoding: str = "utf-8", max_bytes: int = 102400) -> str:
-    """
-    读取文件内容。支持所有文本文件格式。
-    自动限制读取大小（默认 100KB），防止内存溢出。
-    路径自动规范化，防止路径穿越攻击。
-    """
+    """读取文件内容。当用户说"帮我看看这个文件"、"读取某某文件"、"打开文件"时调用。支持所有文本文件格式，自动限制大小（默认100KB），路径自动规范化防穿越。"""
     try:
         safe_path = resolve_safe_path(path)
 
@@ -85,11 +81,7 @@ def read_file(path: str, encoding: str = "utf-8", max_bytes: int = 102400) -> st
 
 @tool(args_schema=WriteFileInput)
 def write_file(path: str, content: str, mode: str = "overwrite") -> str:
-    """
-    写入或追加文件内容。
-    路径必须在项目白名单目录内（如 ./data, ./output, ./static），
-    防止覆盖系统关键文件。
-    """
+    """写入或追加文件内容。当用户说"帮我写个文件"、"保存内容到"、"创建文件"时调用。路径必须在项目白名单目录内（./data, ./output, ./static），防止覆盖系统文件。"""
     try:
         safe_path = validate_write_path(path)
 
@@ -114,12 +106,7 @@ def write_file(path: str, content: str, mode: str = "overwrite") -> str:
 
 @tool(args_schema=SearchFilesInput)
 def search_files(pattern: str, root_dir: str = ".") -> str:
-    """
-    按 glob 模式搜索文件。
-    例如：search_files('*.py') 搜索所有 Python 文件
-          search_files('**/*.md') 递归搜索所有 Markdown 文件
-    返回找到的文件列表（含大小和修改时间）。
-    """
+    """按文件名模式搜索文件。当用户说"找一下某某文件"、"搜索文件"、"哪些.py文件"时调用。支持glob语法如 *.py、**/*.md，返回文件名、大小和修改时间。"""
     try:
         safe_root = resolve_safe_path(root_dir)
 
@@ -157,10 +144,7 @@ def search_files(pattern: str, root_dir: str = ".") -> str:
 
 @tool(args_schema=ListDirInput)
 def list_directory(path: str = ".", show_hidden: bool = False) -> str:
-    """
-    列出目录内容（非递归）。
-    显示每个条目的名称、类型（文件夹/文件）、大小、修改时间。
-    """
+    """列出目录内容。当用户说"看看这个目录有什么"、"列出文件夹"、"目录结构"时调用。非递归，显示文件夹/文件、大小、修改时间。"""
     try:
         safe_path = resolve_safe_path(path)
 

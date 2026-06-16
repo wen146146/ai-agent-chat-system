@@ -289,8 +289,9 @@ class SemanticSaveInput(BaseModel):
 def semantic_memory_save(user_id: str, title: str, content: str,
                          category: str = "", metadata: Dict[str, Any] = None) -> str:
     """
-    保存语义记忆：存储知识要点、用户偏好、学习总结等长期知识。
-    同时写入MySQL和Qdrant向量数据库，支持关键词检索和语义相似度检索。
+    保存语义记忆到长期知识库。当用户说"记住我喜欢..."、"我的偏好是..."、"总结一下刚才的内容"时调用。
+    语义记忆 = 长期知识（"用户喜欢吃辣"、"用户是Java后端工程师"），支持关键词和语义两种搜索方式。
+    同时写入MySQL和Qdrant，区别于情景记忆（对话流水账）。
     """
     if metadata is None:
         metadata = {}
@@ -315,8 +316,9 @@ class SemanticSearchInput(BaseModel):
 def semantic_memory_search(user_id: str, query: str, search_type: str = "hybrid",
                            top_k: int = 5, category: str = "") -> str:
     """
-    检索语义记忆：按用户ID和查询内容，从语义记忆库中检索相关知识。
-    支持向量语义搜索（Qdrant）、关键词精确搜索（MySQL）和混合模式。
+    搜索已保存的语义记忆。当需要回顾之前用户说过的偏好、知识要点或总结时调用。
+    支持三种模式：vector（语义搜索）、keyword（关键词精确）、hybrid（混合，推荐）。
+    适合场景："我之前说过什么偏好"、"帮我找找关于XXX的笔记"、"查一下我存过的知识点"。
     """
     results = _store.search(user_id, query, search_type, category, top_k)
     if not results:
@@ -337,7 +339,7 @@ class SemanticDeleteInput(BaseModel):
 @tool(args_schema=SemanticDeleteInput)
 def semantic_memory_delete(memory_id: int) -> str:
     """
-    删除语义记忆：同时从MySQL和Qdrant中移除指定ID的记忆记录。
+    按ID删除一条语义记忆。同时从MySQL和Qdrant中移除。需要先通过 semantic_memory_search 查到记忆的ID。
     """
     ok = _store.delete(memory_id)
     return f"[语义记忆] #{memory_id} {'已删除' if ok else '删除失败(不存在)'}"
@@ -350,8 +352,7 @@ class SemanticCountInput(BaseModel):
 @tool(args_schema=SemanticCountInput)
 def semantic_memory_count(user_id: str = "") -> str:
     """
-    统计语义记忆数量：返回指定用户或全部语义记忆的条数。
-    用于了解知识库积累情况。
+    统计语义记忆的总条数。返回指定用户或全部用户的记忆数量，用于了解知识库的积累情况。
     """
     cnt = _store.count(user_id)
     scope = f"用户 {user_id}" if user_id else "全部"

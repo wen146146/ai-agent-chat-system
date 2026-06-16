@@ -212,11 +212,7 @@ class RunCommandInput(BaseModel):
 
 @tool(args_schema=RunCommandInput)
 def run_command(command: str, cwd: str = ".", timeout: int = 15) -> str:
-    """
-    执行 Shell 命令。
-    只允许白名单中的命令，危险命令和任意代码执行被拦截。
-    适用于查看目录、运行 git、查系统信息等场景。
-    """
+    """执行 Shell 命令。当用户说"运行个命令"、"帮我执行"、"查一下系统配置"时调用。只允许白名单命令（dir/git/npm/ipconfig等），危险命令和任意代码执行被拦截。适合：查看目录、运行git、查网络状态等。"""
     try:
         # --- 安全检查 ---
         _validate_command(command)

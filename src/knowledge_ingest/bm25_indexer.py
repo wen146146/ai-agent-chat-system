@@ -78,7 +78,7 @@ class InvertedIndexBuilder:
             return []
 
         words = jieba.lcut(cleaned)
-        return [w for w in words if len(w) >= 2 and w not in STOP_WORDS]
+        return [w for w in words if len(w) >= 2 and w not in STOP_WORDS and not re.match(r'^\d+$', w)]
 
     @staticmethod
     def build_terms(content: str) -> Counter:

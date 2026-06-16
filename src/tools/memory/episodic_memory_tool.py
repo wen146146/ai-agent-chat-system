@@ -225,14 +225,10 @@ class EpisodicSaveInput(BaseModel):
 @tool(args_schema=EpisodicSaveInput)
 def episodic_memory_save(user_id: str, event_type: str, content: str, metadata: Dict[str, Any] = None) -> str:
     """
-    工具1：保存情景记忆。
-    把用户与AI的一次交互事件写入MySQL episodic_memories表。
-    后续可通过 episodic_memory_search 按用户和关键词检索。
-
-    使用场景举例：
-      - 用户说"你好" → event_type="user_message", content="你好"
-      - AI回复了 → event_type="ai_response", content="AI的回复内容"
-      - 用户要求记住某事 → event_type="user_message", content="用户要记住的内容"
+    保存对话记录到情景记忆。当用户说"记住这个"、"帮我记一下"或明确要求保存某条信息时调用。
+    情景记忆 = 对话流水账（记录谁说了什么、什么时候说的），可按关键词搜索。
+    event_type 可选: user_message（用户说的话）、ai_response（AI回复）、system_event、tool_call、conversation_summary。
+    注意：不需要每次对话都调用，仅当用户明确要求"记住"时使用。
     """
     try:
         mem_id = _save_to_db(user_id, event_type, content, metadata)
@@ -255,14 +251,9 @@ class EpisodicSearchInput(BaseModel):
 @tool(args_schema=EpisodicSearchInput)
 def episodic_memory_search(user_id: str, keyword: str = "", limit: int = 10) -> str:
     """
-    工具2：搜索情景记忆。
-    按用户ID和可选关键词搜索历史交互记录。
-    keyword为空时返回该用户最近10条记录；
-    填了关键词则对content字段做 LIKE %关键词% 模糊匹配。
-
-    使用场景举例：
-      - "我之前问过什么？" → keyword="" 返回最近记录
-      - "我上次问天气是什么时候？" → keyword="天气"
+    搜索情景记忆，查找历史对话记录。当用户问"我之前说了什么"、"我们刚才聊了什么"时调用。
+    keyword为空时返回最近10条记录；有关键词则模糊匹配。
+    情景记忆 = 对话流水账（记录每次交互的内容和时间），区别于语义记忆（存储知识要点和偏好）。
     """
     results = _search_from_db(user_id, keyword, limit)
     if not results:
@@ -288,9 +279,7 @@ class EpisodicDeleteInput(BaseModel):
 @tool(args_schema=EpisodicDeleteInput)
 def episodic_memory_delete(memory_id: int) -> str:
     """
-    工具3：删除情景记忆。
-    按主键ID从MySQL删除一条记录。
-    返回删除结果（成功/记录不存在）。
+    按ID删除一条情景记忆记录。当用户说"删掉刚才记的那个"时调用。需要先通过 episodic_memory_search 查到记忆的ID。
     """
     ok = _delete_from_db(memory_id)
     return f"[情景记忆] #{memory_id} {'已删除' if ok else '删除失败(不存在)'}"
