@@ -34,6 +34,7 @@ from langchain.memory import ConversationBufferMemory
 
 # 日志模块
 from src.utils.logger import logger
+from src.utils.audit import log_tool_call
 
 # ============================================================================
 # 配置
@@ -42,6 +43,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "12"))
 
 # LangChain ChatOpenAI 客户端（原生支持 function calling）
 _model = ChatOpenAI(
@@ -70,9 +72,15 @@ TOOL_MAP: Dict[str, BaseTool] = {t.name: t for t in NATIVE_TOOLS}
 # ============================================================================
 
 SYSTEM_PROMPT = (
-    "你是一个智能助手。你可以使用提供的工具来帮助用户解决问题。"
-    "回复请用中文，简洁清晰。"
-    "如果不需要工具就直接回答。"
+    "你是一个智能面试知识助手。\n\n"
+    "核心能力：\n"
+    "1. 知识问答 - 从知识库检索技术面试相关问题\n"
+    "2. 工具调用 - 需要时可计算、搜索、操作文件\n"
+    "3. 记忆功能 - 自动记住对话中的关键信息\n\n"
+    "回答原则：\n"
+    "- 专业、简洁、有引用来源\n"
+    "- 需要工具时主动调用，不需要时不啰嗦\n"
+    "- 如果工具返回结果，把结果整合到回答中"
 )
 
 
@@ -111,11 +119,11 @@ class ChatSession:
           4. 检查是否有 tool_calls：
              - 有 → 执行工具 → 追加结果到消息列表 → 回到步骤2
              - 无 → 返回 content
-        最多循环 8 轮，防止死循环。
+        最多循环 {MAX_AGENT_ITERATIONS} 轮，防止死循环。
         """
         messages = self._build_messages(user_message)
 
-        for _ in range(8):
+        for _ in range(MAX_AGENT_ITERATIONS):
             # 绑定工具到模型（每次调用都绑，确保一致性）
             model_with_tools = _model.bind_tools(NATIVE_TOOLS)
 
@@ -145,15 +153,20 @@ class ChatSession:
                         json.dumps(tool_args, ensure_ascii=False)
                     )
 
-                    # 执行原生工具
+                    # 执行原生工具（带计时和审计）
+                    import time as _time
+                    _t0 = _time.time()
                     tool = TOOL_MAP.get(tool_name)
                     if tool:
                         try:
                             result = str(tool.invoke(tool_args))
+                            log_tool_call(tool_name, tool_args, "success", int((_time.time() - _t0) * 1000))
                         except Exception as e:
                             result = f"[工具执行错误] {e}"
+                            log_tool_call(tool_name, tool_args, "error", int((_time.time() - _t0) * 1000))
                     else:
                         result = f"[错误] 工具 {tool_name} 不存在"
+                        log_tool_call(tool_name, tool_args, "error", 0)
 
                     callback.on_tool_end(result[:500])
 

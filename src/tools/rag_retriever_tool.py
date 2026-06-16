@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 from src.knowledge_ingest.vector_store import VectorStore, EmbeddingService
 from src.knowledge_ingest.chunk_store import ChunkStore
+from src.knowledge_ingest.bm25_index import BM25Index
 
 QUERY_PREPROCESS_ENABLED = os.getenv("QUERY_PREPROCESS_ENABLED", "true").lower() == "true"
 QUERY_EXPAND_ENABLED = os.getenv("QUERY_EXPAND_ENABLED", "true").lower() == "true"
@@ -23,6 +24,7 @@ QUERY_EXPAND_COUNT = int(os.getenv("QUERY_EXPAND_COUNT", "3"))
 RETRIEVER_TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
 RETRIEVER_SCORE_THRESHOLD = float(os.getenv("RETRIEVER_SCORE_THRESHOLD", "0.6"))
 RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+RRF_K = int(os.getenv("RRF_K", "60"))
 
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
@@ -84,6 +86,7 @@ class RagRetrieveTool:
         self._chunk_store = None
         self._embedding = None
         self._llm = None
+        self._bm25 = None
         self._initialized = True
 
     def initialize(self):
@@ -94,6 +97,15 @@ class RagRetrieveTool:
             self._chunk_store = ChunkStore()
             self._embedding = EmbeddingService()
             self._llm = SimpleLLM()
+        except Exception:
+            pass
+
+        # 加载 BM25 索引（独立 try-catch，失败不阻塞其他检索）
+        try:
+            bm25 = BM25Index()
+            bm25.load_from_mysql()
+            if bm25.is_loaded:
+                self._bm25 = bm25
         except Exception:
             pass
 
@@ -210,80 +222,232 @@ class RagRetrieveTool:
         except Exception:
             return []
 
+    @staticmethod
+    def parse_rerank_response(text: str, doc_count: int) -> list:
+        """
+        从 LLM 回复中提取排序结果。
+        尝试顺序：```json 代码块 → 裸 JSON → 纯数字 → 回退原始顺序
+        """
+        import re, json
+        # 1) 匹配 ```json 代码块
+        match = re.search(r'```(?:json)?\s*\n?(\{.*?\})\n?\s*```', text, re.DOTALL)
+        # 2) 匹配裸 JSON
+        if not match:
+            match = re.search(r'\{.*?"ranked_indices".*?\}', text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1) if match.lastindex else match.group())
+                indices = data.get("ranked_indices", list(range(doc_count)))
+                return [i for i in indices if 0 <= i < doc_count]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+        # 3) 容错：提取数字
+        numbers = [int(n) - 1 for n in re.findall(r'\d+', text) if n.isdigit()]
+        if numbers:
+            return [n for n in numbers if 0 <= n < doc_count]
+        # 4) 回退
+        return list(range(doc_count))
+
     def rerank(self, query: str, results: List[dict]) -> List[dict]:
         if not results or not RERANK_ENABLED:
             return results
         try:
             docs_content = "\n\n".join([
-                f"[文档{i+1}]\n{item.get('content', '')[:500]}"
+                f"[{i+1}] {item.get('content', '')[:300]}"
                 for i, item in enumerate(results)
             ])
-            prompt = f"""请根据以下问题，对文档进行相关性排序：
+            prompt = f"""你是一个文档相关性评估专家。
 
-问题：{query}
+用户查询：{query}
 
+候选文档：
 {docs_content}
 
-请按相关性从高到低输出文档编号，用逗号分隔（如：3,1,2）："""
+请从以下维度评估：
+1. 与查询的主题相关度
+2. 信息完整度
+3. 时效性
+
+输出 JSON：{{"ranked_indices": [3, 1, 5, ...], "scores": [0.95, 0.82, ...], "reason": "简要说明"}}"""
             result = self._llm.invoke(prompt)
-            order_str = result.strip().replace("[", "").replace("]", "")
-            order = []
-            for num_str in order_str.split(","):
-                try:
-                    order.append(int(num_str.strip()) - 1)
-                except Exception:
-                    pass
-            if order:
-                reranked = []
-                for idx in order:
-                    if 0 <= idx < len(results):
-                        reranked.append(results[idx])
-                for item in results:
-                    if item not in reranked:
-                        reranked.append(item)
-                return reranked
+            order = self.parse_rerank_response(result, len(results))
+
+            reranked = []
+            seen = set()
+            for idx in order:
+                if idx not in seen:
+                    seen.add(idx)
+                    reranked.append(results[idx])
+            for i, item in enumerate(results):
+                if i not in seen:
+                    reranked.append(item)
+            return reranked
         except Exception:
-            pass
-        return results
+            return results
 
     def merge_results(self, vector_results: List[dict], mysql_results: List[dict], top_k: int) -> List[dict]:
-        seen_contents = set()
-        merged = []
+        """旧版双路融合（保留向后兼容，但 retrieve() 已改用 RRF）。"""
+        return self.fuse_results(
+            vector_results=vector_results,
+            bm25_results=[],
+            keyword_results=mysql_results,
+            top_k=top_k,
+        )
 
-        for item in sorted(vector_results, key=lambda x: x.get("score", 0), reverse=True):
-            content_key = item.get("content", "")[:100]
-            if content_key not in seen_contents:
-                seen_contents.add(content_key)
-                merged.append(item)
+    # ----------------------------------------------------------------
+    # BM25 稀疏检索
+    # ----------------------------------------------------------------
 
-        for item in sorted(mysql_results, key=lambda x: x.get("score", 0), reverse=True):
-            content_key = item.get("content", "")[:100]
-            if content_key not in seen_contents:
-                seen_contents.add(content_key)
-                merged.append(item)
+    def bm25_search(self, query: str, kb_ids: List[int] = None, top_k: int = 20) -> List[dict]:
+        """BM25 稀疏检索入口（封装 BM25Index.search）。"""
+        if self._bm25 is None:
+            return []
+        return self._bm25.search(query, top_k)
 
-        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
-        return merged[:top_k]
+    # ----------------------------------------------------------------
+    # RRF 三路融合
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def fuse_results(
+        vector_results: List[dict],
+        bm25_results: List[dict],
+        keyword_results: List[dict],
+        top_k: int = 5,
+        k: int = None,
+    ) -> List[dict]:
+        """
+        RRF（Reciprocal Rank Fusion）三路结果融合。
+
+        score(doc) = 1/(k + rank_vector) + 1/(k + rank_bm25) + 1/(k + rank_keyword)
+
+        优点：
+          - 排名比分数更稳定，消除跨模型分数量纲差
+          - Qdrant cosine (0~1) 和 BM25 (0~open) 的分数直接不可比
+          - 排第 1 名贡献 1/(k+1)，排第 10 名贡献 1/(k+10)，差距平滑
+        """
+        if k is None:
+            k = RRF_K
+
+        def _rank(items: List[dict], sort_key: str) -> dict:
+            """将结果列表按 sort_key 降序排列，返回 {dedup_key: rank}。"""
+            ranked = {}
+            for idx, item in enumerate(
+                sorted(items, key=lambda x: abs(x.get(sort_key, 0)), reverse=True), 1
+            ):
+                key = item.get("chunk_id") or item.get("content", "")[:100]
+                if key not in ranked:
+                    ranked[key] = idx
+            return ranked
+
+        vector_ranked = _rank(vector_results, "score") if vector_results else {}
+        bm25_ranked = _rank(bm25_results, "bm25_score") if bm25_results else {}
+        keyword_ranked = _rank(keyword_results, "score") if keyword_results else {}
+
+        # 所有候选文档的 dedup key
+        all_keys = set(vector_ranked) | set(bm25_ranked) | set(keyword_ranked)
+
+        # 计算 RRF 分数
+        rrf_scores = {}
+        for key in all_keys:
+            score = 0.0
+            score += 1.0 / (k + vector_ranked.get(key, 999))
+            score += 1.0 / (k + bm25_ranked.get(key, 999))
+            score += 1.0 / (k + keyword_ranked.get(key, 999))
+            rrf_scores[key] = round(score, 6)
+
+        # 从原始结果中提取 metadata
+        meta_cache: Dict[str, dict] = {}
+        for item in vector_results + bm25_results + keyword_results:
+            key = item.get("chunk_id") or item.get("content", "")[:100]
+            if key not in meta_cache:
+                meta_cache[key] = {
+                    "content": item.get("content", ""),
+                    "filename": item.get("filename", ""),
+                    "doc_id": item.get("doc_id"),
+                    "kb_id": item.get("kb_id"),
+                    "source_types": set(),
+                    "best_score": 0.0,
+                }
+            # 记录来自哪一路
+            src = item.get("source", "unknown")
+            meta_cache[key]["source_types"].add(src)
+            meta_cache[key]["best_score"] = max(
+                meta_cache[key]["best_score"],
+                abs(item.get("score", 0)) or abs(item.get("bm25_score", 0)),
+            )
+
+        # 按 RRF 分数降序取 Top-K
+        ranked_keys = sorted(rrf_scores.keys(), key=lambda k: -rrf_scores[k])
+
+        results = []
+        for key in ranked_keys[:top_k]:
+            meta = meta_cache.get(key, {})
+            source_types = meta.get("source_types", set())
+            # source 标签：优先显示主要来源
+            source_label = "fusion"
+            if source_types == {"vector"}:
+                source_label = "vector"
+            elif source_types == {"bm25"}:
+                source_label = "bm25"
+            elif source_types == {"keyword"} or source_types == {"mysql"}:
+                source_label = "keyword"
+
+            results.append({
+                "content": meta.get("content", ""),
+                "rrf_score": rrf_scores[key],
+                "score": meta.get("best_score", 0),
+                "filename": meta.get("filename", ""),
+                "doc_id": meta.get("doc_id"),
+                "kb_id": meta.get("kb_id"),
+                "source": source_label,
+                "source_detail": "+".join(sorted(source_types)),
+            })
+
+        return results
 
     def retrieve(self, query: str, kb_ids: List[int] = None, top_k: int = 5) -> List[dict]:
+        """
+        三路检索 + RRF 融合 + LLM 重排 完整管线。
+
+        检索路数：
+          ① Qdrant 语义向量检索
+          ② BM25 稀疏检索（倒排索引）
+          ③ MySQL LIKE 关键词检索（保留向下兼容）
+
+        融合策略：RRF Reciprocal Rank Fusion
+        """
         if kb_ids is None:
             kb_ids = []
 
+        # 取更多候选让融合 + 重排有足够素材
+        retrieve_k = max(top_k * 3, 15)
+
+        # 1. Query 预处理 + 扩写（现有不变）
         processed_query = self.query_preprocess(query)
         expanded_queries = self.query_expand(processed_query)
 
-        vector_results = self.vector_search(expanded_queries, kb_ids, top_k)
+        # 2. 三路并行检索
+        vector_results = self.vector_search(expanded_queries, kb_ids, retrieve_k)
 
         keywords, synonyms = self.extract_keywords(query)
+        mysql_results = self.keyword_search_mysql(keywords, synonyms, kb_ids, retrieve_k)
 
-        mysql_results = self.keyword_search_mysql(keywords, synonyms, kb_ids, top_k)
+        bm25_results = self.bm25_search(query, kb_ids, retrieve_k)
 
-        merged_results = self.merge_results(vector_results, mysql_results, top_k)
+        # 3. RRF 三路融合
+        fused_results = self.fuse_results(
+            vector_results=vector_results,
+            bm25_results=bm25_results,
+            keyword_results=mysql_results,
+            top_k=top_k * 2 if RERANK_ENABLED else top_k,
+        )
 
+        # 4. LLM 重排（可选）
         if RERANK_ENABLED:
-            merged_results = self.rerank(query, merged_results)
+            fused_results = self.rerank(query, fused_results)
 
-        return merged_results
+        return fused_results[:top_k]
 
     def format_results(self, results: List[dict]) -> str:
         if not results:
@@ -291,10 +455,17 @@ class RagRetrieveTool:
         lines = ["📖 **参考资料：**"]
         for i, item in enumerate(results, 1):
             filename = item.get("filename", "未知文件")
-            score = item.get("score", 0)
+            score = item.get("rrf_score") or item.get("score", 0)
             content = item.get("content", "")[:200].replace("\n", " ")
-            source_tag = {"vector": "[向量]", "mysql": "[关键词]"}.get(item.get("source", ""), "")
-            lines.append(f"{i}. {source_tag}【{filename}】相关度:{score:.2f}\n   {content}...")
+            source_label = {
+                "vector": "🟦[向量]",
+                "bm25": "🟩[BM25]",
+                "keyword": "🟨[关键词]",
+                "fusion": "🔀[融合]",
+            }.get(item.get("source", ""), "")
+            detail = item.get("source_detail", "")
+            tag = f"{source_label}" if not detail else f"{source_label}({detail})"
+            lines.append(f"{i}. {tag}【{filename}】相关度:{score:.4f}\n   {content}...")
         return "\n\n".join(lines)
 
 
@@ -302,6 +473,9 @@ _rag_tool_instance = RagRetrieveTool()
 
 
 def _init_rag_retriever():
+    """初始化 RAG 检索器（懒加载）：确保数据库表就绪 + 加载索引。"""
+    from src.knowledge_ingest.inverted_index_schema import ensure_inverted_index_tables
+    ensure_inverted_index_tables()
     _rag_tool_instance.initialize()
 
 
@@ -309,13 +483,14 @@ def _init_rag_retriever():
 def rag_retrieve(query: str, kb_ids: List[int] = None, top_k: int = 5) -> str:
     """
     RAG知识库检索工具，输入用户问题，从知识库中检索相关文档内容。
-    多阶段检索流程：
+    三路检索 + RRF 融合 + LLM 重排完整管线：
     1. 查询预处理 - LLM标准化+润色+纠错
     2. 查询扩写 - LLM生成多条语义相似表达
-    3. 向量检索(Qdrant) - 批量语义搜索+去重
-    4. 关键词检索(MySQL) - 关键词+同义词精确匹配
-    5. 结果合并 - 双路去重+排序
-    6. Rerank重排(预留) - RERANK_ENABLED=true时启用
+    3. 向量检索(Qdrant) - 语义搜索
+    4. BM25稀疏检索(倒排索引) - 词频统计排序
+    5. 关键词检索(MySQL) - 同义词精确匹配 (保留)
+    6. RRF三路融合 - Reciprocal Rank Fusion
+    7. Rerank重排(可选) - LLM精排
     """
     _init_rag_retriever()
 

@@ -34,6 +34,12 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
+# 启动时检查必要环境变量（仅打印警告，不阻塞启动）
+from src.utils.config_loader import validate_keys_at_startup
+_startup_warnings = validate_keys_at_startup()
+for _w in _startup_warnings:
+    print(_w)
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -348,7 +354,7 @@ async def upload_file(
       - kb_id: 知识库ID（可选，默认1）
       - doc_id: 文档ID（可选，默认自动生成时间戳ID）
 
-    处理流程（5步）：
+    处理流程（6步）：
       步骤1 - 读文件：读取上传的二进制内容，记录文件名和大小
       步骤2 - 格式转换：调用 file_converter.convert_to_markdown()
                PDF→pypdf逐页提取 / DOCX→python-docx解析
@@ -362,6 +368,9 @@ async def upload_file(
       步骤5 - Qdrant向量化：调用 VectorStore.add_chunks()
                每个分块→DashScope嵌入→1024维向量→Qdrant upsert
                先删旧向量，再插入新向量
+      步骤6 - 倒排索引构建：调用 InvertedIndexBuilder.add_chunks()
+               jieba分词 → 写入 document_terms + doc_stats
+               先删旧倒排（按doc_id），再插入新记录
 
     返回值示例：
       {
@@ -397,6 +406,7 @@ async def upload_file(
     from src.knowledge_ingest.document_processor import DocumentProcessor
     from src.knowledge_ingest.chunk_store import ChunkStore
     from src.knowledge_ingest.vector_store import VectorStore
+    from src.knowledge_ingest.bm25_indexer import InvertedIndexBuilder
 
     start_time = time.time()
     filename = file.filename
@@ -543,9 +553,34 @@ async def upload_file(
 
     elapsed = round(time.time() - start_time, 2)
 
+    # ============================
+    # 步骤6: 倒排索引构建（BM25）
+    # ============================
+    inverted_saved = 0
+    inverted_error = None
+    try:
+        builder = InvertedIndexBuilder()
+        # 先删旧倒排（幂等覆盖，同doc_id重复上传时清理旧记录）
+        builder.remove_document(doc_id)
+        # 写入新倒排
+        builder.add_chunks(chunks)
+        inverted_saved = len(chunks)
+        steps.append({
+            "step": 6,
+            "name": "倒排索引",
+            "detail": f"{inverted_saved}/{len(chunks)} terms indexed"
+        })
+    except Exception as e:
+        inverted_error = str(e)
+        steps.append({
+            "step": 6,
+            "name": "倒排索引",
+            "detail": f"failed: {inverted_error}"
+        })
+
     return {
-        # success判断：MySQL或Qdrant任一写入成功即为成功
-        "success": True if mysql_saved > 0 or qdrant_saved > 0 else False,
+        # success判断：MySQL、Qdrant、倒排索引任一成功即为成功
+        "success": True if mysql_saved > 0 or qdrant_saved > 0 or inverted_saved > 0 else False,
         "filename": filename,
         "file_size": file_size,
         "doc_id": doc_id,
@@ -553,6 +588,7 @@ async def upload_file(
         "chunk_count": len(chunks),
         "mysql_saved": mysql_saved,
         "qdrant_saved": qdrant_saved,
+        "inverted_saved": inverted_saved,
         "elapsed": elapsed,
         "steps": steps,  # 每步执行详情，前端可展示进度条
     }
@@ -633,18 +669,23 @@ async def list_documents(kb_id: int):
 
 @app.delete("/api/kb/{kb_id}/doc/{doc_id}")
 async def delete_document(kb_id: int, doc_id: int):
-    """删除知识库中的指定文档"""
+    """删除知识库中的指定文档（同时清理倒排索引和向量）"""
     try:
         from src.knowledge_ingest.chunk_store import ChunkStore
         from src.knowledge_ingest.vector_store import VectorStore
+        from src.knowledge_ingest.bm25_indexer import InvertedIndexBuilder
         chunk_store = ChunkStore()
         vector_store = VectorStore()
         deleted_chunks = chunk_store.delete_chunks_by_document(doc_id)
         deleted_vectors = vector_store.delete_by_document(doc_id)
+        # 清理倒排索引
+        builder = InvertedIndexBuilder()
+        builder.remove_document(doc_id)
         return {
             "success": True,
             "deleted_chunks": deleted_chunks,
-            "deleted_vectors": deleted_vectors
+            "deleted_vectors": deleted_vectors,
+            "inverted_cleaned": True
         }
     except Exception as e:
         logger.error(f"[kb_delete] {str(e)}", exc_info=True)

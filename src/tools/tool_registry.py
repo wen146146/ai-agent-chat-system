@@ -92,6 +92,10 @@ class ToolRegistry:
             semantic_memory_delete,
             semantic_memory_count,
         )
+        from src.tools.file_tools import read_file, write_file, search_files, list_directory
+        from src.tools.shell_tools import run_command
+        from src.tools.app_tools import open_application, list_applications
+        from src.tools.system_tools import get_system_info, get_process_list
 
         return [
             calculator,
@@ -105,6 +109,11 @@ class ToolRegistry:
             semantic_memory_search,
             semantic_memory_delete,
             semantic_memory_count,
+            # Phase 2 新增工具
+            read_file, write_file, search_files, list_directory,
+            run_command,
+            open_application, list_applications,
+            get_system_info, get_process_list,
         ]
 
     @classmethod

@@ -95,6 +95,29 @@
         .welcome p { font-size: 14px; line-height: 1.8; }
         
         .error-msg { background: #3f1212; border: 1px solid #5f2020; border-radius: 8px; padding: 10px 14px; color: #f87171; font-size: 13px; }
+
+        /* 来源引用卡片 */
+        .source-card { background: #161616; border: 1px solid #2a2a2a; border-radius: 10px; padding: 12px 16px; margin-top: 4px; align-self: flex-start; max-width: 85%; }
+        .source-header { font-size: 12px; color: #888; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+        .source-list { display: flex; flex-direction: column; gap: 6px; }
+        .source-item { padding: 8px 10px; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 6px; cursor: pointer; transition: all 0.15s; }
+        .source-item:hover { border-color: #3b82f6; background: #1a2744; }
+        .source-item-header { display: flex; justify-content: space-between; align-items: center; }
+        .source-name { font-size: 12px; color: #93c5fd; font-weight: 500; }
+        .source-score { font-size: 11px; color: #666; }
+        .source-badge { font-size: 10px; color: #888; background: #2a2a2a; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
+        .source-content { font-size: 12px; color: #a1a1aa; line-height: 1.5; margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a2a2a; display: none; white-space: pre-wrap; }
+        .source-content.open { display: block; }
+
+        /* 打字机光标动画 */
+        .cursor-blink::after { content: '▍'; animation: blink 0.8s infinite; color: #22c55e; }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        /* 知识库快捷筛选（聊天输入区） */
+        .chat-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .chat-filter label { font-size: 12px; color: #666; white-space: nowrap; }
+        .chat-filter select { background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 6px; color: #ccc; font-size: 12px; padding: 4px 8px; max-width: 160px; }
+        .chat-filter .kb-tag { font-size: 11px; color: #555; border: 1px solid #2a2a2a; border-radius: 4px; padding: 2px 8px; }
         
         /* 上传模态框 */
         .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; display: none; }
@@ -182,6 +205,13 @@
         </div>
         
         <div class="input-area">
+            <div class="chat-filter">
+                <label>📚 知识库</label>
+                <select id="chatKbFilter" onchange="currentKbId = parseInt(this.value);">
+                    <option value="0">全部知识库</option>
+                </select>
+                <span class="kb-tag">默认检索当前知识库</span>
+            </div>
             <div class="input-container">
                 <div class="input-wrapper">
                     <textarea id="messageInput" rows="1" placeholder="输入消息... (Shift+Enter换行, Enter发送)" onkeydown="handleKeyDown(event)"></textarea>
@@ -189,7 +219,7 @@
                 <button class="btn btn-send" id="sendBtn" onclick="sendMessage()">发送</button>
                 <button class="btn btn-clear" onclick="clearChat()">清空</button>
             </div>
-            <div class="input-hint">Enter 发送 | Shift+Enter 换行 | 工具调用结果自动显示</div>
+            <div class="input-hint">Enter 发送 | Shift+Enter 换行 | 知识库引用结果自动显示</div>
         </div>
     </div>
     
@@ -243,16 +273,14 @@
         let currentAssistantDiv = null;
         let currentToolResults = [];
         let accumulatedText = '';
+        let currentSources = [];
         let currentKbId = 1;
         let selectedFile = null;
-        
-        // 初始化
+
+        // 初始化（优先恢复已有会话）
         async function init() {
             try {
-                const res = await fetch('/api/session', { method: 'POST' });
-                const data = await res.json();
-                sessionId = data.session_id;
-                document.getElementById('sessionInfo').textContent = ` | Session: ${sessionId}`;
+                await restoreSession();
                 setStatus('connected', '已连接');
                 await loadKnowledgeBases();
                 await loadDocuments();
@@ -260,6 +288,34 @@
                 setStatus('error', '后端未启动');
                 console.error(e);
             }
+        }
+
+        // 会话恢复（sessionStorage 持久化 + 优雅降级）
+        async function restoreSession() {
+            const savedSessionId = sessionStorage.getItem('sessionId');
+            if (!savedSessionId) {
+                await createNewSession();
+                return;
+            }
+            // 向后端验证 session 是否有效
+            const res = await fetch(`/api/history/${savedSessionId}`);
+            if (res.ok) {
+                sessionId = savedSessionId;
+                document.getElementById('sessionInfo').textContent = ` | Session: ${sessionId}`;
+                return;
+            }
+            // 服务重启导致 session 丢失 → 自动重建
+            console.warn('Session expired, creating new one');
+            sessionStorage.removeItem('sessionId');
+            await createNewSession();
+        }
+
+        async function createNewSession() {
+            const res = await fetch('/api/session', { method: 'POST' });
+            const data = await res.json();
+            sessionId = data.session_id;
+            sessionStorage.setItem('sessionId', sessionId);
+            document.getElementById('sessionInfo').textContent = ` | Session: ${sessionId}`;
         }
         
         function setStatus(type, text) {
@@ -294,15 +350,27 @@
         }
         
         function updateKbSelect() {
-            const select = document.getElementById('uploadKbSelect');
-            select.innerHTML = '';
+            // 上传弹窗中的知识库选择
+            const uploadSelect = document.getElementById('uploadKbSelect');
+            uploadSelect.innerHTML = '';
+            // 聊天区的知识库筛选
+            const chatFilter = document.getElementById('chatKbFilter');
+            chatFilter.innerHTML = '<option value="0">全部知识库</option>';
+
             document.querySelectorAll('.kb-item').forEach(item => {
                 const kbId = item.dataset.kbId;
                 const name = item.querySelector('.kb-item-name').textContent;
-                const opt = document.createElement('option');
-                opt.value = kbId;
-                opt.textContent = name;
-                select.appendChild(opt);
+                // 上传弹窗
+                const opt1 = document.createElement('option');
+                opt1.value = kbId;
+                opt1.textContent = name;
+                uploadSelect.appendChild(opt1);
+                // 聊天区筛选
+                const opt2 = document.createElement('option');
+                opt2.value = kbId;
+                opt2.textContent = name;
+                if (kbId == currentKbId) opt2.selected = true;
+                chatFilter.appendChild(opt2);
             });
         }
         
@@ -311,6 +379,11 @@
             document.querySelectorAll('.kb-item').forEach(item => {
                 item.classList.toggle('active', item.dataset.kbId == kbId);
             });
+            // 同步聊天区筛选下拉框
+            const chatFilter = document.getElementById('chatKbFilter');
+            if (chatFilter) {
+                chatFilter.value = kbId;
+            }
             loadDocuments();
         }
         
@@ -542,54 +615,63 @@
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if (!message || isStreaming) return;
-            
+
             addMessage('user', message);
             input.value = '';
             input.style.height = 'auto';
             isStreaming = true;
             document.getElementById('sendBtn').disabled = true;
             showTyping();
-            
+
             accumulatedText = '';
             currentToolResults = [];
-            
+            currentSources = [];
+
+            // 携带当前知识库筛选
+            const kbFilters = currentKbId ? [currentKbId] : [];
+
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message, session_id: sessionId })
+                    body: JSON.stringify({ message, session_id: sessionId, kb_ids: kbFilters })
                 });
-                
+
                 removeTyping();
                 const assistantDiv = addMessage('assistant', '');
                 currentAssistantDiv = assistantDiv;
                 const contentDiv = assistantDiv.querySelector('.message-content');
                 contentDiv.innerHTML = '';
-                
+
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
-                
+                let hasFinalOutput = false;
+
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    
+
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || '';
-                    
+
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
                         try {
                             const event = JSON.parse(line.slice(6));
-                            
+
                             if (event.type === 'token') {
                                 accumulatedText += event.content;
                                 contentDiv.textContent = accumulatedText;
+                                // 光标闪烁
+                                contentDiv.classList.remove('cursor-blink');
+                                void contentDiv.offsetWidth;
+                                contentDiv.classList.add('cursor-blink');
                                 scrollToBottom();
                             } else if (event.type === 'tool_start' || event.type === 'tool_call') {
                                 const toolName = event.name || 'tool';
-                                accumulatedText += '\n[调用工具: ' + toolName + '...]';
+                                accumulatedText += '\n[🛠 调用工具: ' + toolName + '...]';
                                 contentDiv.textContent = accumulatedText;
                                 scrollToBottom();
                             } else if (event.type === 'tool_result') {
@@ -597,16 +679,35 @@
                                 addToolCard('结果', result);
                                 currentToolResults.push({ name: 'tool', result });
                                 scrollToBottom();
+                            } else if (event.type === 'source') {
+                                // 收集引用来源（等待 final_output 后统一展示）
+                                if (event.sources) {
+                                    currentSources = currentSources.concat(event.sources);
+                                }
+                            } else if (event.type === 'final_output') {
+                                hasFinalOutput = true;
+                                // 显示引用来源卡片
+                                if (currentSources.length > 0) {
+                                    renderSourceCard(currentSources, assistantDiv);
+                                }
+                                // 移除光标动画
+                                contentDiv.classList.remove('cursor-blink');
                             } else if (event.type === 'error') {
                                 addError(event.content);
                             }
                         } catch (e) { }
                     }
                 }
-                
+
+                // 流结束后再检查一次（如果后端没发 final_output 类型）
+                if (!hasFinalOutput && currentSources.length > 0) {
+                    renderSourceCard(currentSources, assistantDiv);
+                }
+
                 if (!accumulatedText && currentToolResults.length > 0) {
                     contentDiv.textContent = '[工具调用完成]';
                 }
+                contentDiv.classList.remove('cursor-blink');
             } catch (e) {
                 removeTyping();
                 addError('请求失败: ' + e.message);
@@ -614,6 +715,43 @@
                 isStreaming = false;
                 document.getElementById('sendBtn').disabled = false;
                 scrollToBottom();
+            }
+        }
+
+        // 渲染引用来源卡片
+        function renderSourceCard(sources, assistantDiv) {
+            if (!sources || sources.length === 0) return;
+            const container = document.getElementById('chatContainer');
+            const card = document.createElement('div');
+            card.className = 'source-card';
+            let itemsHtml = sources.map((s, idx) => {
+                const filename = s.filename || s.file_name || '未知文件';
+                const score = s.score || s.rrf_score || 0;
+                const snippet = s.snippet || s.content || '';
+                const badge = s.source || 'knowledge';
+                return `
+                    <div class="source-item" onclick="toggleSource(this)">
+                        <div class="source-item-header">
+                            <span class="source-name">${escapeHtml(filename)}</span>
+                            <span>
+                                <span class="source-badge">${escapeHtml(badge)}</span>
+                                <span class="source-score">相关度 ${(score * 100).toFixed(0)}%</span>
+                            </span>
+                        </div>
+                        <div class="source-content">${escapeHtml(snippet.substring(0, 300))}</div>
+                    </div>
+                `;
+            }).join('');
+            card.innerHTML = `<div class="source-header">📚 参考资料 (${sources.length})</div><div class="source-list">${itemsHtml}</div>`;
+            container.appendChild(card);
+            scrollToBottom();
+        }
+
+        // 展开/折叠来源内容
+        function toggleSource(el) {
+            const content = el.querySelector('.source-content');
+            if (content) {
+                content.classList.toggle('open');
             }
         }
         
