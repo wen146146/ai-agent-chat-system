@@ -35,6 +35,7 @@ from langchain.memory import ConversationBufferMemory
 # 日志模块
 from src.utils.logger import logger
 from src.utils.audit import log_tool_call
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # 对话历史 MySQL 持久化
 from src.server.chat_store import ChatStore, ensure_table
@@ -48,6 +49,8 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
 MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "12"))
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
+ITERATION_TIMEOUT = int(os.getenv("ITERATION_TIMEOUT", "60"))
 
 # LangChain ChatOpenAI 客户端（原生支持 function calling）
 _model = ChatOpenAI(
@@ -56,6 +59,7 @@ _model = ChatOpenAI(
     openai_api_key=OPENAI_API_KEY,
     openai_api_base=OPENAI_BASE_URL,
     streaming=True,  # 启用流式输出
+    timeout=LLM_TIMEOUT,  # LLM 请求超时（秒）
 )
 
 
@@ -172,16 +176,29 @@ class ChatSession:
             # 绑定工具到模型（每次调用都绑，确保一致性）
             model_with_tools = _model.bind_tools(NATIVE_TOOLS)
 
-            # 流式调用，逐 chunk 收集并通知前端
+            # 流式调用，逐 chunk 收集并通知前端（带超时）
             full_message: Optional[AIMessage] = None
-            for chunk in model_with_tools.stream(messages):
-                if full_message is None:
-                    full_message = chunk
-                else:
-                    full_message += chunk
-                # 逐字推送给前端
-                if chunk.content:
-                    callback.on_llm_new_token(chunk.content)
+
+            def _run_llm_stream():
+                """在子线程中执行一轮 LLM 流式调用。"""
+                nonlocal full_message
+                for chunk in model_with_tools.stream(messages):
+                    if full_message is None:
+                        full_message = chunk
+                    else:
+                        full_message += chunk
+                    if chunk.content:
+                        callback.on_llm_new_token(chunk.content)
+                return full_message
+
+            try:
+                with ThreadPoolExecutor() as pool:
+                    future = pool.submit(_run_llm_stream)
+                    full_message = future.result(timeout=ITERATION_TIMEOUT)
+            except TimeoutError:
+                callback.on_tool_end(f"[超时] LLM 响应超过 {ITERATION_TIMEOUT}s")
+                logger.warning(f"[agent] 会话 {self.session_id} 迭代超时 ({ITERATION_TIMEOUT}s)")
+                return f"处理超时，请简化问题后重试（超过 {ITERATION_TIMEOUT} 秒）"
 
             # 检查原生 tool_calls
             if full_message and full_message.tool_calls:

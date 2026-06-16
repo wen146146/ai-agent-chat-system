@@ -97,3 +97,20 @@ def log_tool_call(tool_name: str, args: dict, status: str, duration_ms: int):
         "duration_ms": duration_ms,
     }, ensure_ascii=False)
     audit_logger.info(record)
+
+
+def log_degradation(component: str, reason: str, impact: str = ""):
+    """
+    记录降级事件到审计日志。
+
+    参数:
+      component: 降级组件，如 "BM25" / "Qdrant" / "LLM" / "Agent"
+      reason:    降级原因，如 "MySQL 连接失败" / "请求超时 (30s)"
+      impact:    影响范围，如 "退化为纯 Qdrant 检索"
+    """
+    audit_logger.info(json.dumps({
+        "type": "degradation",
+        "component": component,
+        "reason": reason,
+        "impact": impact,
+    }, ensure_ascii=False))

@@ -50,6 +50,7 @@ import time
 
 # 从Agent编排模块导入核心功能
 from src.agent.agent_chain import stream_chat, SessionManager, create_default_session
+import time
 
 # 日志模块
 from src.utils.logger import logger
@@ -59,6 +60,7 @@ from src.utils.logger import logger
 # ============================================================================
 HOST = os.getenv("HOST", "0.0.0.0")  # 监听地址，0.0.0.0=接受所有网卡请求
 PORT = int(os.getenv("PORT", "8000"))  # 监听端口
+CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "120"))  # SSE 总超时（秒）
 
 # 创建 FastAPI 应用实例
 app = FastAPI(title="AI Agent Chat API", version="1.0")
