@@ -49,6 +49,7 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
 MAX_AGENT_ITERATIONS = int(os.getenv("MAX_AGENT_ITERATIONS", "12"))
+MAX_HISTORY_ROUNDS = int(os.getenv("MAX_HISTORY_ROUNDS", "10"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
 ITERATION_TIMEOUT = int(os.getenv("ITERATION_TIMEOUT", "60"))
 
@@ -148,12 +149,21 @@ class ChatSession:
 
     def _build_messages(self, user_message: str) -> list:
         """
-        构建发给 LLM 的完整消息列表（使用 LangChain 原生消息类型）。
-        system prompt + 历史对话（含工具调用） + 当前用户消息
+        构建发给 LLM 的完整消息列表（滑动窗口）。
+        system prompt + 第一轮 + 最近 N-1 轮 + 当前用户消息。
+        MAX_HISTORY_ROUNDS 控制保留的对话轮数，防止上下文无限增长。
         """
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
-        # 直接使用 memory 中保存的 LangChain 消息对象
-        for msg in self.memory.chat_memory.messages:
+        all_msgs = self.memory.chat_memory.messages
+        max_msg_count = MAX_HISTORY_ROUNDS * 2  # 每轮 user + assistant
+
+        if len(all_msgs) > max_msg_count:
+            # 保留第一轮（2 条）+ 最近 N-1 轮
+            recent_msgs = all_msgs[:2] + all_msgs[-(max_msg_count - 2):]
+        else:
+            recent_msgs = all_msgs
+
+        for msg in recent_msgs:
             messages.append(msg)
         messages.append(HumanMessage(content=user_message))
         return messages
